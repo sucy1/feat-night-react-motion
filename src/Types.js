@@ -22,11 +22,19 @@ export type OpaqueConfig = {
   damping: number,
   precision: number,
 };
+// options accepted by `chain(steps, options)`
+export type ChainOptions = {
+  signal?: { aborted?: boolean, addEventListener?: (type: string, listener: () => void) => void, ... },
+  onCancel?: () => void,
+};
 // the object returned by `chain([spring(a), spring(b), ...])`. For internal usage only!
 export type ChainOpaqueConfig = OpaqueConfig & {
   __chain: true,
   __currentStep: number,
+  __cancelled: boolean,
   __steps: Array<OpaqueConfig>,
+  __getCancelled: () => boolean,
+  cancel: () => void,
 };
 // your typical style object given in props. Maps to a number or a spring config or a chain config
 export type Style = {

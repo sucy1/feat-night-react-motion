@@ -25,6 +25,7 @@ type MotionState = {
   lastIdealStyle: PlainStyle,
   lastIdealVelocity: Velocity,
   currentChainSteps: { [key: string]: number },
+  cancelledChains: { [key: string]: boolean },
 };
 
 export default class Motion extends React.Component<MotionProps, MotionState> {
@@ -54,6 +55,7 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
     const currentStyle = defaultStyle || stripStyle(style);
     const currentVelocity = mapToZero(currentStyle);
     const currentChainSteps: { [key: string]: number } = {};
+    const cancelledChains: { [key: string]: boolean } = {};
     for (let key in style) {
       if (!Object.prototype.hasOwnProperty.call(style, key)) {
         continue;
@@ -61,6 +63,10 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
       const styleValue = style[key];
       if (typeof styleValue !== 'number' && styleValue.__chain) {
         currentChainSteps[key] = 0;
+        cancelledChains[key] =
+          (typeof styleValue.__getCancelled === 'function' &&
+            styleValue.__getCancelled()) ||
+          styleValue.__cancelled === true;
       }
     }
     return {
@@ -69,6 +75,7 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
       lastIdealStyle: currentStyle,
       lastIdealVelocity: currentVelocity,
       currentChainSteps,
+      cancelledChains,
     };
   }
 
@@ -119,14 +126,71 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
         lastIdealStyle,
         lastIdealVelocity,
         currentChainSteps: this.state.currentChainSteps,
+        cancelledChains: this.state.cancelledChains,
       });
     }
+  };
+
+  isChainCancelled = (key: string): boolean => {
+    if (this.state.cancelledChains[key]) {
+      return true;
+    }
+    const styleValue = this.props.style[key];
+    if (typeof styleValue === 'number' || !styleValue.__chain) {
+      return false;
+    }
+    return (
+      (typeof styleValue.__getCancelled === 'function' &&
+        styleValue.__getCancelled()) ||
+      styleValue.__cancelled === true
+    );
+  };
+
+  checkCancelledChains = (): boolean => {
+    const propsStyle: Style = this.props.style;
+    let changed = false;
+    let cancelledChains = this.state.cancelledChains;
+    let currentVelocity = this.state.currentVelocity;
+
+    for (let key in propsStyle) {
+      if (!Object.prototype.hasOwnProperty.call(propsStyle, key)) {
+        continue;
+      }
+      if (cancelledChains[key]) {
+        continue;
+      }
+      const styleValue = propsStyle[key];
+      if (typeof styleValue === 'number' || !styleValue.__chain) {
+        continue;
+      }
+      const cancelled =
+        (typeof styleValue.__getCancelled === 'function' &&
+          styleValue.__getCancelled()) ||
+        styleValue.__cancelled === true;
+      if (cancelled) {
+        if (!changed) {
+          changed = true;
+          cancelledChains = { ...cancelledChains };
+          currentVelocity = { ...currentVelocity };
+        }
+        cancelledChains[key] = true;
+        currentVelocity[key] = 0;
+      }
+    }
+
+    if (changed) {
+      this.setState({ cancelledChains, currentVelocity });
+    }
+    return changed;
   };
 
   getEffectiveStyleValue = (key: string): number | OpaqueConfig => {
     const styleValue = this.props.style[key];
     if (typeof styleValue === 'number' || !styleValue.__chain) {
       return styleValue;
+    }
+    if (this.isChainCancelled(key)) {
+      return this.state.currentStyle[key];
     }
     const currentStep = this.state.currentChainSteps[key] || 0;
     return styleValue.__steps[currentStep];
@@ -148,6 +212,9 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
 
       const styleValue = propsStyle[key];
       if (typeof styleValue === 'number' || !styleValue.__chain) {
+        continue;
+      }
+      if (this.isChainCancelled(key)) {
         continue;
       }
 
@@ -189,6 +256,7 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
         lastIdealStyle,
         lastIdealVelocity,
         currentChainSteps,
+        cancelledChains: this.state.cancelledChains,
       });
     }
 
@@ -236,6 +304,13 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
       // that the callback of defaultRaf is called, then setState will be called
       // on unmounted component.
       if (this.unmounting) {
+        return;
+      }
+
+      // detect externally cancelled chains first (AbortSignal or cancel())
+      if (this.checkCancelledChains()) {
+        this.animationID = null;
+        this.startAnimationIfNecessary();
         return;
       }
 
@@ -344,6 +419,8 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
         currentVelocity: newCurrentVelocity,
         lastIdealStyle: newLastIdealStyle,
         lastIdealVelocity: newLastIdealVelocity,
+        currentChainSteps: this.state.currentChainSteps,
+        cancelledChains: this.state.cancelledChains,
       });
 
       this.unreadPropStyle = null;
@@ -363,8 +440,9 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
       this.clearUnreadPropStyle(this.unreadPropStyle);
     }
 
-    // initialize chain steps for new incoming style keys
+    // initialize chain steps/cancellation for new incoming style keys
     let currentChainSteps = this.state.currentChainSteps;
+    let cancelledChains = this.state.cancelledChains;
     let chainStepsDirty = false;
     for (let key in props.style) {
       if (!Object.prototype.hasOwnProperty.call(props.style, key)) {
@@ -376,13 +454,18 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
           if (!chainStepsDirty) {
             chainStepsDirty = true;
             currentChainSteps = { ...currentChainSteps };
+            cancelledChains = { ...cancelledChains };
           }
           currentChainSteps[key] = 0;
+          cancelledChains[key] =
+            (typeof styleValue.__getCancelled === 'function' &&
+              styleValue.__getCancelled()) ||
+            styleValue.__cancelled === true;
         }
       }
     }
     if (chainStepsDirty) {
-      this.setState({ currentChainSteps });
+      this.setState({ currentChainSteps, cancelledChains });
     }
 
     this.unreadPropStyle = props.style;

@@ -258,4 +258,241 @@ describe('chain', () => {
     mockRaf.step(99);
     expect(countChain[countChain.length - 1]).toBe(10);
   });
+
+  it('should expose cancel method on returned chain config', () => {
+    const c = chain([spring(10), spring(20)]);
+    expect(typeof c.cancel).toBe('function');
+    expect(c.__cancelled).toBe(false);
+    c.cancel();
+    expect(c.__cancelled).toBe(true);
+    // cancel is idempotent
+    c.cancel();
+    expect(c.__cancelled).toBe(true);
+  });
+
+  it('should call onCancel callback when cancelled', () => {
+    const onCancel = createSpy('onCancel');
+    const c = chain([spring(10), spring(20)], { onCancel });
+    expect(onCancel).not.toHaveBeenCalled();
+    c.cancel();
+    expect(onCancel.calls.count()).toBe(1);
+    c.cancel();
+    expect(onCancel.calls.count()).toBe(1);
+  });
+
+  it('should not throw even if onCancel callback throws', () => {
+    const c = chain([spring(10), spring(20)], {
+      onCancel: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(() => c.cancel()).not.toThrow();
+    expect(c.__cancelled).toBe(true);
+  });
+
+  it('should respect pre-aborted AbortSignal', () => {
+    const signal = { aborted: true, addEventListener() {} };
+    const c = chain([spring(10), spring(20)], { signal });
+    expect(c.__cancelled).toBe(true);
+  });
+
+  it('should react to AbortSignal abort event', () => {
+    let listener = null;
+    const signal = {
+      aborted: false,
+      addEventListener(type, cb) {
+        if (type === 'abort') {
+          listener = cb;
+        }
+      },
+    };
+    const c = chain([spring(10), spring(20)], { signal });
+    expect(c.__cancelled).toBe(false);
+    expect(typeof listener).toBe('function');
+    listener();
+    expect(c.__cancelled).toBe(true);
+  });
+
+  it('should stop chain mid-animation when cancel() is called', () => {
+    let count = [];
+    let chainCfg;
+
+    class App extends React.Component {
+      constructor() {
+        super();
+        chainCfg = chain([
+          spring(100, { stiffness: 1000, damping: 500, precision: 1 }),
+          spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+        ]);
+      }
+      render() {
+        return (
+          <Motion defaultStyle={{ a: 0 }} style={{ a: chainCfg }}>
+            {({ a }) => {
+              count.push(a);
+              return null;
+            }}
+          </Motion>
+        );
+      }
+    }
+    TestUtils.renderIntoDocument(<App />);
+
+    // start animating towards 100
+    mockRaf.step(10);
+    const lastBeforeCancel = count[count.length - 1];
+    expect(lastBeforeCancel).toBeGreaterThan(0);
+    expect(lastBeforeCancel).toBeLessThan(100);
+
+    // cancel the chain now
+    chainCfg.cancel();
+    const frozenValue = count[count.length - 1];
+
+    // further steps should not change the value anymore (no more interpolation)
+    mockRaf.step(200);
+    const lastAfterCancel = count[count.length - 1];
+    expect(lastAfterCancel).toBe(frozenValue);
+
+    // and it should NOT have reached the second step target (0)
+    const everReachedZero = count.some(v => v === 0);
+    expect(everReachedZero).toBe(false);
+  });
+
+  it('should trigger onRest when chain is cancelled mid-animation', () => {
+    const onRest = createSpy('onRest');
+    let chainCfg;
+
+    class App extends React.Component {
+      constructor() {
+        super();
+        chainCfg = chain([
+          spring(100, { stiffness: 1000, damping: 500, precision: 1 }),
+          spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+        ]);
+      }
+      render() {
+        return (
+          <Motion
+            defaultStyle={{ a: 0 }}
+            style={{ a: chainCfg }}
+            onRest={onRest}
+          >
+            {() => null}
+          </Motion>
+        );
+      }
+    }
+    TestUtils.renderIntoDocument(<App />);
+
+    mockRaf.step(5);
+    expect(onRest).not.toHaveBeenCalled();
+
+    chainCfg.cancel();
+    mockRaf.step(20);
+    expect(onRest.calls.count()).toBe(1);
+  });
+
+  it('should recover from cancel by passing a fresh chain prop', () => {
+    let count = [];
+    let setStateOuter = () => {};
+
+    class App extends React.Component {
+      constructor() {
+        super();
+        this.state = {
+          cfg: chain([
+            spring(10, { stiffness: 1000, damping: 500, precision: 1 }),
+            spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+          ]),
+        };
+      }
+      componentWillMount() {
+        setStateOuter = this.setState.bind(this);
+      }
+      render() {
+        return (
+          <Motion defaultStyle={{ a: 0 }} style={{ a: this.state.cfg }}>
+            {({ a }) => {
+              count.push(a);
+              return null;
+            }}
+          </Motion>
+        );
+      }
+    }
+    TestUtils.renderIntoDocument(<App />);
+
+    // cancel the first chain mid-way
+    mockRaf.step(5);
+    const firstChainCfg = count.slice();
+    expect(firstChainCfg[firstChainCfg.length - 1]).toBeGreaterThan(0);
+
+    // cancel current chain
+    // (we stored it through state but we can just pass a fresh one to recover)
+    const freshChain = chain([
+      spring(100, { stiffness: 1000, damping: 500, precision: 1 }),
+      spring(200, { stiffness: 1000, damping: 500, precision: 1 }),
+    ]);
+    setStateOuter({ cfg: freshChain });
+    count.length = 0;
+
+    // the fresh (non-cancelled) chain should run to completion
+    mockRaf.step(400);
+
+    const reached100 = count.some(v => Math.abs(v - 100) <= 1);
+    const reached200 = count.some(v => Math.abs(v - 200) <= 1);
+    expect(reached100).toBe(true);
+    expect(reached200).toBe(true);
+    expect(count[count.length - 1]).toBe(200);
+  });
+
+  it('should support independent cancellation per key in multi-key chain', () => {
+    let count = [];
+    let chainA;
+    let chainB;
+
+    class App extends React.Component {
+      constructor() {
+        super();
+        chainA = chain([
+          spring(100, { stiffness: 1000, damping: 500, precision: 1 }),
+          spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+        ]);
+        chainB = chain([
+          spring(200, { stiffness: 1000, damping: 500, precision: 1 }),
+          spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+        ]);
+      }
+      render() {
+        return (
+          <Motion
+            defaultStyle={{ a: 0, b: 0 }}
+            style={{ a: chainA, b: chainB }}
+          >
+            {({ a, b }) => {
+              count.push([a, b]);
+              return null;
+            }}
+          </Motion>
+        );
+      }
+    }
+    TestUtils.renderIntoDocument(<App />);
+
+    mockRaf.step(10);
+    const beforeCancel = count[count.length - 1];
+    expect(beforeCancel[0]).toBeGreaterThan(0);
+    expect(beforeCancel[1]).toBeGreaterThan(0);
+
+    // cancel only chainA
+    chainA.cancel();
+    const frozenA = count[count.length - 1][0];
+
+    mockRaf.step(300);
+
+    // chainA should be frozen, chainB should have finished both steps and reached 0
+    const afterCancel = count[count.length - 1];
+    expect(afterCancel[0]).toBe(frozenA);
+    expect(afterCancel[1]).toBe(0);
+  });
 });
