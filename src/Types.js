@@ -27,14 +27,21 @@ export type ChainOptions = {
   signal?: { aborted?: boolean, addEventListener?: (type: string, listener: () => void) => void, ... },
   onCancel?: () => void,
 };
+// options accepted by `chainConfig.cancel(options)`
+export type ChainCancelOptions = {
+  graceful?: boolean,
+};
 // the object returned by `chain([spring(a), spring(b), ...])`. For internal usage only!
 export type ChainOpaqueConfig = OpaqueConfig & {
   __chain: true,
   __currentStep: number,
   __cancelled: boolean,
+  __cancellingGraceful: boolean,
   __steps: Array<OpaqueConfig>,
   __getCancelled: () => boolean,
-  cancel: () => void,
+  __getCancellingGraceful: () => boolean,
+  __resolveGracefulCancel: () => void,
+  cancel: (options?: ChainCancelOptions) => void,
 };
 // your typical style object given in props. Maps to a number or a spring config or a chain config
 export type Style = {

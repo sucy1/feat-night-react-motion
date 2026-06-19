@@ -204,6 +204,7 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
     let lastIdealStyle = this.state.lastIdealStyle;
     let lastIdealVelocity = this.state.lastIdealVelocity;
     let currentChainSteps = this.state.currentChainSteps;
+    let cancelledChains = this.state.cancelledChains;
 
     for (let key in propsStyle) {
       if (!Object.prototype.hasOwnProperty.call(propsStyle, key)) {
@@ -227,7 +228,19 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
           currentStepConfig.precision &&
         Math.abs(currentVelocity[key]) <= currentStepConfig.precision;
 
-      if (reached && stepIndex < styleValue.__steps.length - 1) {
+      if (!reached) {
+        continue;
+      }
+
+      const isGracefullyCancelling =
+        (typeof styleValue.__getCancellingGraceful === 'function' &&
+          styleValue.__getCancellingGraceful()) ||
+        styleValue.__cancellingGraceful === true;
+
+      if (isGracefullyCancelling) {
+        if (typeof styleValue.__resolveGracefulCancel === 'function') {
+          styleValue.__resolveGracefulCancel();
+        }
         if (!progressed) {
           progressed = true;
           currentStyle = { ...currentStyle };
@@ -235,6 +248,21 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
           lastIdealStyle = { ...lastIdealStyle };
           lastIdealVelocity = { ...lastIdealVelocity };
           currentChainSteps = { ...currentChainSteps };
+          cancelledChains = { ...cancelledChains };
+        }
+        cancelledChains[key] = true;
+        continue;
+      }
+
+      if (stepIndex < styleValue.__steps.length - 1) {
+        if (!progressed) {
+          progressed = true;
+          currentStyle = { ...currentStyle };
+          currentVelocity = { ...currentVelocity };
+          lastIdealStyle = { ...lastIdealStyle };
+          lastIdealVelocity = { ...lastIdealVelocity };
+          currentChainSteps = { ...currentChainSteps };
+          cancelledChains = { ...cancelledChains };
         }
 
         const nextStepIndex = stepIndex + 1;
@@ -256,7 +284,7 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
         lastIdealStyle,
         lastIdealVelocity,
         currentChainSteps,
-        cancelledChains: this.state.cancelledChains,
+        cancelledChains,
       });
     }
 

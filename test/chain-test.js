@@ -495,4 +495,252 @@ describe('chain', () => {
     expect(afterCancel[0]).toBe(frozenA);
     expect(afterCancel[1]).toBe(0);
   });
+
+  describe('graceful cancel', () => {
+    it('should enter gracefully-cancelling state without immediate cancel', () => {
+      const c = chain([spring(10), spring(20)]);
+      expect(c.__cancelled).toBe(false);
+      expect(c.__cancellingGraceful).toBe(false);
+
+      c.cancel({ graceful: true });
+
+      expect(c.__cancellingGraceful).toBe(true);
+      expect(c.__cancelled).toBe(false);
+    });
+
+    it('graceful cancel is idempotent', () => {
+      let called = 0;
+      const c = chain([spring(10), spring(20)], {
+        onCancel: () => {
+          called++;
+        },
+      });
+      c.cancel({ graceful: true });
+      c.cancel({ graceful: true });
+      expect(c.__cancellingGraceful).toBe(true);
+      // onCancel not called yet because it's only called when fully cancelled
+      expect(called).toBe(0);
+    });
+
+    it('hard cancel after graceful cancel upgrades to immediate cancel', () => {
+      let called = 0;
+      const c = chain([spring(10), spring(20)], {
+        onCancel: () => {
+          called++;
+        },
+      });
+      c.cancel({ graceful: true });
+      expect(c.__cancellingGraceful).toBe(true);
+      expect(c.__cancelled).toBe(false);
+
+      c.cancel(); // hard cancel
+
+      expect(c.__cancelled).toBe(true);
+      expect(c.__cancellingGraceful).toBe(false);
+      expect(called).toBe(1);
+    });
+
+    it('graceful cancel on last step completes normally and calls onCancel', () => {
+      let count = [];
+      const onRest = createSpy('onRest');
+      const onCancel = createSpy('onCancel');
+      let chainCfg;
+
+      class App extends React.Component {
+        constructor() {
+          super();
+          chainCfg = chain(
+            [
+              spring(10, { stiffness: 1000, damping: 500, precision: 1 }),
+              spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+            ],
+            { onCancel },
+          );
+        }
+        render() {
+          return (
+            <Motion
+              defaultStyle={{ a: 0 }}
+              style={{ a: chainCfg }}
+              onRest={onRest}
+            >
+              {({ a }) => {
+                count.push(a);
+                return null;
+              }}
+            </Motion>
+          );
+        }
+      }
+      TestUtils.renderIntoDocument(<App />);
+
+      // let it reach first step target (10)
+      mockRaf.step(99);
+      const reached10 = count.some(v => v === 10);
+      expect(reached10).toBe(true);
+
+      // onCancel should not have been called yet (still progressing)
+      expect(onCancel).not.toHaveBeenCalled();
+
+      // now we're animating toward 0 (second step). Cancel gracefully.
+      // cancel gracefully on the second (last) step
+      chainCfg.cancel({ graceful: true });
+      expect(chainCfg.__cancellingGraceful).toBe(true);
+
+      // let the current step finish
+      mockRaf.step(299);
+
+      // should reach 0 (the current step's target)
+      expect(count[count.length - 1]).toBe(0);
+
+      // onCancel should be called once when the step finishes
+      expect(onCancel.calls.count()).toBe(1);
+
+      // onRest should also fire
+      expect(onRest.calls.count()).toBe(1);
+    });
+
+    it('should not progress to next step when gracefully cancelled mid-chain', () => {
+      let count = [];
+      const onCancel = createSpy('onCancel');
+      let chainCfg;
+
+      class App extends React.Component {
+        constructor() {
+          super();
+          chainCfg = chain(
+            [
+              spring(100, { stiffness: 1000, damping: 500, precision: 1 }),
+              spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+            ],
+            { onCancel },
+          );
+        }
+        render() {
+          return (
+            <Motion defaultStyle={{ a: 0 }} style={{ a: chainCfg }}>
+              {({ a }) => {
+                count.push(a);
+                return null;
+              }}
+            </Motion>
+          );
+        }
+      }
+      TestUtils.renderIntoDocument(<App />);
+
+      // cancel gracefully while still on first step (animating toward 100)
+      mockRaf.step(5);
+      const valueAtCancelTime = count[count.length - 1];
+      expect(valueAtCancelTime).toBeGreaterThan(0);
+      expect(valueAtCancelTime).toBeLessThan(100);
+
+      chainCfg.cancel({ graceful: true });
+      expect(onCancel).not.toHaveBeenCalled();
+
+      // let the first step finish
+      mockRaf.step(299);
+
+      // should have reached 100 (current step target)
+      const reached100 = count.some(v => v === 100);
+      expect(reached100).toBe(true);
+
+      // onCancel should fire when step completes
+      expect(onCancel.calls.count()).toBe(1);
+
+      // but should NOT have reached 0 (never advanced to second step)
+      const everReachedZero = count.some(v => v === 0);
+      expect(everReachedZero).toBe(false);
+
+      // final value should be 100
+      expect(count[count.length - 1]).toBe(100);
+    });
+
+    it('should trigger onRest after graceful cancel completes', () => {
+      const onRest = createSpy('onRest');
+      let chainCfg;
+
+      class App extends React.Component {
+        constructor() {
+          super();
+          chainCfg = chain([
+            spring(50, { stiffness: 1000, damping: 500, precision: 1 }),
+            spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+          ]);
+        }
+        render() {
+          return (
+            <Motion
+              defaultStyle={{ a: 0 }}
+              style={{ a: chainCfg }}
+              onRest={onRest}
+            >
+              {() => null}
+            </Motion>
+          );
+        }
+      }
+      TestUtils.renderIntoDocument(<App />);
+
+      // cancel gracefully on first step
+      mockRaf.step(3);
+      chainCfg.cancel({ graceful: true });
+      expect(onRest).not.toHaveBeenCalled();
+
+      // let first step finish
+      mockRaf.step(299);
+
+      // onRest should fire once (after graceful cancel resolves)
+      expect(onRest.calls.count()).toBe(1);
+    });
+
+    it('should support graceful cancel on multiple chains independently', () => {
+      let count = [];
+      let chainA;
+      let chainB;
+
+      class App extends React.Component {
+        constructor() {
+          super();
+          chainA = chain([
+            spring(100, { stiffness: 1000, damping: 500, precision: 1 }),
+            spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+          ]);
+          chainB = chain([
+            spring(200, { stiffness: 1000, damping: 500, precision: 1 }),
+            spring(0, { stiffness: 1000, damping: 500, precision: 1 }),
+          ]);
+        }
+        render() {
+          return (
+            <Motion
+              defaultStyle={{ a: 0, b: 0 }}
+              style={{ a: chainA, b: chainB }}
+            >
+              {({ a, b }) => {
+                count.push([a, b]);
+                return null;
+              }}
+            </Motion>
+          );
+        }
+      }
+      TestUtils.renderIntoDocument(<App />);
+
+      // cancel chainA gracefully, chainB hard
+      mockRaf.step(5);
+      chainA.cancel({ graceful: true });
+      chainB.cancel();
+      const frozenB = count[count.length - 1][1];
+
+      mockRaf.step(299);
+
+      // chainB should remain frozen
+      const last = count[count.length - 1];
+      expect(last[1]).toBe(frozenB);
+
+      // chainA should have completed current step (reached 100)
+      expect(last[0]).toBe(100);
+    });
+  });
 });
