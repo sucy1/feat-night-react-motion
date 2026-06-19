@@ -14,6 +14,7 @@ import type {
   Style,
   Velocity,
   MotionProps,
+  OpaqueConfig,
 } from './Types';
 
 const msPerFrame = 1000 / 60;
@@ -23,6 +24,7 @@ type MotionState = {
   currentVelocity: Velocity,
   lastIdealStyle: PlainStyle,
   lastIdealVelocity: Velocity,
+  currentChainSteps: { [key: string]: number },
 };
 
 export default class Motion extends React.Component<MotionProps, MotionState> {
@@ -51,11 +53,22 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
     const { defaultStyle, style } = this.props;
     const currentStyle = defaultStyle || stripStyle(style);
     const currentVelocity = mapToZero(currentStyle);
+    const currentChainSteps: { [key: string]: number } = {};
+    for (let key in style) {
+      if (!Object.prototype.hasOwnProperty.call(style, key)) {
+        continue;
+      }
+      const styleValue = style[key];
+      if (typeof styleValue !== 'number' && styleValue.__chain) {
+        currentChainSteps[key] = 0;
+      }
+    }
     return {
       currentStyle,
       currentVelocity,
       lastIdealStyle: currentStyle,
       lastIdealVelocity: currentVelocity,
+      currentChainSteps,
     };
   }
 
@@ -105,8 +118,108 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
         currentVelocity,
         lastIdealStyle,
         lastIdealVelocity,
+        currentChainSteps: this.state.currentChainSteps,
       });
     }
+  };
+
+  getEffectiveStyleValue = (key: string): number | OpaqueConfig => {
+    const styleValue = this.props.style[key];
+    if (typeof styleValue === 'number' || !styleValue.__chain) {
+      return styleValue;
+    }
+    const currentStep = this.state.currentChainSteps[key] || 0;
+    return styleValue.__steps[currentStep];
+  };
+
+  resolveChainSteps = (): boolean => {
+    const propsStyle: Style = this.props.style;
+    let progressed = false;
+    let currentStyle = this.state.currentStyle;
+    let currentVelocity = this.state.currentVelocity;
+    let lastIdealStyle = this.state.lastIdealStyle;
+    let lastIdealVelocity = this.state.lastIdealVelocity;
+    let currentChainSteps = this.state.currentChainSteps;
+
+    for (let key in propsStyle) {
+      if (!Object.prototype.hasOwnProperty.call(propsStyle, key)) {
+        continue;
+      }
+
+      const styleValue = propsStyle[key];
+      if (typeof styleValue === 'number' || !styleValue.__chain) {
+        continue;
+      }
+
+      const stepIndex =
+        currentChainSteps[key] != null ? currentChainSteps[key] : 0;
+      const currentStepConfig = styleValue.__steps[stepIndex];
+
+      const reached =
+        Math.abs(currentStyle[key] - currentStepConfig.val) <=
+          currentStepConfig.precision &&
+        Math.abs(currentVelocity[key]) <= currentStepConfig.precision;
+
+      if (reached && stepIndex < styleValue.__steps.length - 1) {
+        if (!progressed) {
+          progressed = true;
+          currentStyle = { ...currentStyle };
+          currentVelocity = { ...currentVelocity };
+          lastIdealStyle = { ...lastIdealStyle };
+          lastIdealVelocity = { ...lastIdealVelocity };
+          currentChainSteps = { ...currentChainSteps };
+        }
+
+        const nextStepIndex = stepIndex + 1;
+        currentChainSteps[key] = nextStepIndex;
+        const nextStepConfig = styleValue.__steps[nextStepIndex];
+        currentStyle[key] = currentStepConfig.val;
+        currentVelocity[key] = 0;
+        lastIdealStyle[key] = currentStepConfig.val;
+        lastIdealVelocity[key] = 0;
+        // suppress unused warning
+        void nextStepConfig;
+      }
+    }
+
+    if (progressed) {
+      this.setState({
+        currentStyle,
+        currentVelocity,
+        lastIdealStyle,
+        lastIdealVelocity,
+        currentChainSteps,
+      });
+    }
+
+    return progressed;
+  };
+
+  shouldStopAnimationChainAware = (): boolean => {
+    const propsStyle: Style = this.props.style;
+    for (let key in propsStyle) {
+      if (!Object.prototype.hasOwnProperty.call(propsStyle, key)) {
+        continue;
+      }
+
+      const effectiveValue = this.getEffectiveStyleValue(key);
+      const precision =
+        typeof effectiveValue === 'number' ? 0.01 : effectiveValue.precision;
+
+      if (Math.abs(this.state.currentVelocity[key]) > precision) {
+        return false;
+      }
+
+      const targetVal =
+        typeof effectiveValue === 'number'
+          ? effectiveValue
+          : effectiveValue.val;
+
+      if (Math.abs(this.state.currentStyle[key] - targetVal) > precision) {
+        return false;
+      }
+    }
+    return true;
   };
 
   startAnimationIfNecessary = (): void => {
@@ -126,15 +239,15 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
         return;
       }
 
+      // try to progress chain steps first
+      if (this.resolveChainSteps()) {
+        this.animationID = null;
+        this.startAnimationIfNecessary();
+        return;
+      }
+
       // check if we need to animate in the first place
-      const propsStyle: Style = this.props.style;
-      if (
-        shouldStopAnimation(
-          this.state.currentStyle,
-          propsStyle,
-          this.state.currentVelocity,
-        )
-      ) {
+      if (this.shouldStopAnimationChainAware()) {
         if (this.wasAnimating && this.props.onRest) {
           this.props.onRest();
         }
@@ -175,16 +288,17 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
       let newCurrentStyle: PlainStyle = {};
       let newCurrentVelocity: Velocity = {};
 
+      const propsStyle: Style = this.props.style;
       for (let key in propsStyle) {
         if (!Object.prototype.hasOwnProperty.call(propsStyle, key)) {
           continue;
         }
 
-        const styleValue = propsStyle[key];
-        if (typeof styleValue === 'number') {
-          newCurrentStyle[key] = styleValue;
+        const effectiveValue = this.getEffectiveStyleValue(key);
+        if (typeof effectiveValue === 'number') {
+          newCurrentStyle[key] = effectiveValue;
           newCurrentVelocity[key] = 0;
-          newLastIdealStyle[key] = styleValue;
+          newLastIdealStyle[key] = effectiveValue;
           newLastIdealVelocity[key] = 0;
         } else {
           let newLastIdealStyleValue = this.state.lastIdealStyle[key];
@@ -194,20 +308,20 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
               msPerFrame / 1000,
               newLastIdealStyleValue,
               newLastIdealVelocityValue,
-              styleValue.val,
-              styleValue.stiffness,
-              styleValue.damping,
-              styleValue.precision,
+              effectiveValue.val,
+              effectiveValue.stiffness,
+              effectiveValue.damping,
+              effectiveValue.precision,
             );
           }
           const [nextIdealX, nextIdealV] = stepper(
             msPerFrame / 1000,
             newLastIdealStyleValue,
             newLastIdealVelocityValue,
-            styleValue.val,
-            styleValue.stiffness,
-            styleValue.damping,
-            styleValue.precision,
+            effectiveValue.val,
+            effectiveValue.stiffness,
+            effectiveValue.damping,
+            effectiveValue.precision,
           );
 
           newCurrentStyle[key] =
@@ -247,6 +361,28 @@ export default class Motion extends React.Component<MotionProps, MotionState> {
     if (this.unreadPropStyle != null) {
       // previous props haven't had the chance to be set yet; set them here
       this.clearUnreadPropStyle(this.unreadPropStyle);
+    }
+
+    // initialize chain steps for new incoming style keys
+    let currentChainSteps = this.state.currentChainSteps;
+    let chainStepsDirty = false;
+    for (let key in props.style) {
+      if (!Object.prototype.hasOwnProperty.call(props.style, key)) {
+        continue;
+      }
+      const styleValue = props.style[key];
+      if (typeof styleValue !== 'number' && styleValue.__chain) {
+        if (!(key in currentChainSteps)) {
+          if (!chainStepsDirty) {
+            chainStepsDirty = true;
+            currentChainSteps = { ...currentChainSteps };
+          }
+          currentChainSteps[key] = 0;
+        }
+      }
+    }
+    if (chainStepsDirty) {
+      this.setState({ currentChainSteps });
     }
 
     this.unreadPropStyle = props.style;

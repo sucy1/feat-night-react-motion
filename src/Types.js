@@ -22,8 +22,16 @@ export type OpaqueConfig = {
   damping: number,
   precision: number,
 };
-// your typical style object given in props. Maps to a number or a spring config
-export type Style = { [key: string]: number | OpaqueConfig };
+// the object returned by `chain([spring(a), spring(b), ...])`. For internal usage only!
+export type ChainOpaqueConfig = OpaqueConfig & {
+  __chain: true,
+  __currentStep: number,
+  __steps: Array<OpaqueConfig>,
+};
+// your typical style object given in props. Maps to a number or a spring config or a chain config
+export type Style = {
+  [key: string]: number | OpaqueConfig | ChainOpaqueConfig,
+};
 // the interpolating style object, with the same keys as the above Style object,
 // with the values mapped to numbers, naturally
 export type PlainStyle = { [key: string]: number };
